@@ -12,6 +12,12 @@ import St from 'gi://St';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
+import {
+    getActiveWordIndex,
+    getPlaybackFrame,
+    parseLyricsResponse,
+} from './lyricsModel.js';
+
 Gio._promisify(Gio.DBusConnection.prototype, 'call', 'call_finish');
 Gio._promisify(Gio.DBusProxy, 'new_for_bus', 'new_for_bus_finish');
 Gio._promisify(Soup.Session.prototype,
@@ -24,6 +30,17 @@ const DBUS_INTERFACE = 'org.freedesktop.DBus';
 const PROPERTIES_INTERFACE = 'org.freedesktop.DBus.Properties';
 const TICK_INTERVAL_MS = 200;
 const MAX_CACHE_ENTRIES = 50;
+const MAX_OVERLAY_WIDTH_RATIO = 0.8;
+const POSITION_ALIGNMENTS = {
+    'top-left': [Clutter.ActorAlign.START, Clutter.ActorAlign.START],
+    'top-center': [Clutter.ActorAlign.CENTER, Clutter.ActorAlign.START],
+    'top-right': [Clutter.ActorAlign.END, Clutter.ActorAlign.START],
+    'center-left': [Clutter.ActorAlign.START, Clutter.ActorAlign.CENTER],
+    'center-right': [Clutter.ActorAlign.END, Clutter.ActorAlign.CENTER],
+    'bottom-left': [Clutter.ActorAlign.START, Clutter.ActorAlign.END],
+    'bottom-center': [Clutter.ActorAlign.CENTER, Clutter.ActorAlign.END],
+    'bottom-right': [Clutter.ActorAlign.END, Clutter.ActorAlign.END],
+};
 
 function unpack(value) {
     return value instanceof GLib.Variant ? value.deepUnpack() : value;
@@ -39,29 +56,6 @@ function makeUrl(endpoint, parameters) {
     return `https://lrclib.net/api/${endpoint}?${query}`;
 }
 
-function parseSyncedLyrics(syncedLyrics) {
-    if (!syncedLyrics)
-        return [];
-
-    const lines = [];
-    const timestampPattern = /\[(\d+):(\d+(?:\.\d+)?)\]/g;
-
-    for (const rawLine of syncedLyrics.split('\n')) {
-        const timestamps = [...rawLine.matchAll(timestampPattern)];
-        const text = rawLine.replace(
-            /^(?:\[\d+:\d+(?:\.\d+)?\]\s*)+/, '');
-
-        for (const match of timestamps) {
-            lines.push({
-                time: Number(match[1]) * 60 + Number(match[2]),
-                text,
-            });
-        }
-    }
-
-    return lines.sort((a, b) => a.time - b.time);
-}
-
 export default class EnlightenerExtension extends Extension {
     enable() {
         this._lifecycleGeneration = (this._lifecycleGeneration ?? 0) + 1;
@@ -71,8 +65,9 @@ export default class EnlightenerExtension extends Extension {
         this._lyricsCache = new Map();
         this._selectedPlayer = null;
         this._trackKey = null;
-        this._lines = [];
-        this._currentText = '';
+        this._document = null;
+        this._renderSignature = null;
+        this._hasContent = false;
         this._positionUs = 0;
         this._positionReadAtUs = GLib.get_monotonic_time();
         this._playbackStatus = 'Stopped';
@@ -86,6 +81,27 @@ export default class EnlightenerExtension extends Extension {
         this._createOverlay();
 
         this._settings = this.getSettings();
+        this._settingsSignalIds = [
+            this._settings.connect('changed::position', () => {
+                this._applyPosition();
+                this._renderSignature = null;
+                this._renderPlaybackFrame();
+            }),
+            this._settings.connect('changed::context-lines', () => {
+                this._renderSignature = null;
+                this._renderPlaybackFrame();
+            }),
+            this._settings.connect('changed::background-opacity', () =>
+                this._applyColors()),
+        ];
+        this._interfaceSettings = new Gio.Settings({
+            schema_id: 'org.gnome.desktop.interface',
+        });
+        this._colorSchemeSignalId = this._interfaceSettings.connect(
+            'changed::color-scheme', () => this._applyColors());
+        this._applyPosition();
+        this._applyColors();
+
         Main.wm.addKeybinding(
             'toggle-overlay',
             this._settings,
@@ -117,7 +133,7 @@ export default class EnlightenerExtension extends Extension {
             GLib.PRIORITY_DEFAULT,
             TICK_INTERVAL_MS,
             () => {
-                this._updateCurrentLine();
+                this._renderPlaybackFrame();
                 return GLib.SOURCE_CONTINUE;
             });
 
@@ -142,6 +158,15 @@ export default class EnlightenerExtension extends Extension {
 
         Main.wm.removeKeybinding('toggle-overlay');
 
+        for (const signalId of this._settingsSignalIds)
+            this._settings.disconnect(signalId);
+        this._settingsSignalIds = [];
+
+        if (this._colorSchemeSignalId) {
+            this._interfaceSettings.disconnect(this._colorSchemeSignalId);
+            this._colorSchemeSignalId = 0;
+        }
+
         this._cancellable?.cancel();
         this._lyricsCancellable?.cancel();
         this._session?.abort();
@@ -163,14 +188,16 @@ export default class EnlightenerExtension extends Extension {
         }
 
         this._overlay = null;
-        this._label = null;
+        this._card = null;
         this._settings = null;
+        this._interfaceSettings = null;
         this._session = null;
         this._cancellable = null;
         this._lyricsCancellable = null;
         this._players = null;
         this._pendingPlayers = null;
         this._lyricsCache = null;
+        this._document = null;
     }
 
     _createOverlay() {
@@ -179,18 +206,19 @@ export default class EnlightenerExtension extends Extension {
             reactive: false,
             visible: false,
         });
-        this._label = new St.Label({
-            style_class: 'enlightener-overlay',
+        this._overlay.connect('destroy', actor => {
+            if (this._overlay === actor) {
+                this._overlay = null;
+                this._card = null;
+            }
+        });
+        this._card = new St.BoxLayout({
+            style_class: 'enlightener-card',
+            vertical: true,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.END,
-            x_expand: true,
-            y_expand: true,
         });
-        this._label.clutter_text.set({
-            line_alignment: Pango.Alignment.CENTER,
-            line_wrap: true,
-        });
-        this._overlay.add_child(this._label);
+        this._overlay.add_child(this._card);
 
         Main.layoutManager.addChrome(this._overlay, {
             affectsStruts: false,
@@ -207,14 +235,16 @@ export default class EnlightenerExtension extends Extension {
         if (!monitor || !this._overlay)
             return;
 
-        this._overlay.set_position(monitor.x, monitor.y);
-        this._overlay.set_size(monitor.width, monitor.height);
-        this._label.set_width(Math.floor(monitor.width * 0.8));
+        const workArea = Main.layoutManager.getWorkAreaForMonitor(monitor.index);
+        this._overlay.set_position(workArea.x, workArea.y);
+        this._overlay.set_size(workArea.width, workArea.height);
+        this._renderSignature = null;
+        this._renderPlaybackFrame();
     }
 
     _toggleOverlay() {
         this._userVisible = !this._userVisible;
-        this._overlay.visible = this._userVisible && Boolean(this._currentText);
+        this._overlay.visible = this._userVisible && this._hasContent;
     }
 
     async _discoverPlayers() {
@@ -274,7 +304,8 @@ export default class EnlightenerExtension extends Extension {
                         const [positionUs] = parameters.deepUnpack();
                         this._positionSerial++;
                         this._setPosition(Number(positionUs));
-                        this._updateCurrentLine();
+                        this._renderSignature = null;
+                        this._renderPlaybackFrame();
                     }
                 });
             entry.ownerSignalId = proxy.connect('notify::g-name-owner', () => {
@@ -304,8 +335,8 @@ export default class EnlightenerExtension extends Extension {
         if (name === this._selectedPlayer) {
             this._selectedPlayer = null;
             this._trackKey = null;
-            this._lines = [];
-            this._setText('');
+            this._document = null;
+            this._hideOverlay();
         }
 
         this._choosePlayer();
@@ -356,10 +387,9 @@ export default class EnlightenerExtension extends Extension {
 
         this._selectedPlayer = nextName;
         this._trackKey = null;
-        this._lines = [];
+        this._document = null;
         this._readPlaybackState();
         this._updateTrack();
-        this._syncPosition();
     }
 
     _property(proxy, name, fallback = null) {
@@ -379,7 +409,11 @@ export default class EnlightenerExtension extends Extension {
         this._rate = Number(this._property(entry.proxy, 'Rate', 1)) || 1;
 
         if (this._playbackStatus === 'Stopped')
-            this._setText('');
+            this._hideOverlay();
+        else {
+            this._renderSignature = null;
+            this._renderPlaybackFrame();
+        }
     }
 
     _updateTrack() {
@@ -400,8 +434,8 @@ export default class EnlightenerExtension extends Extension {
 
         if (!title || !artist) {
             this._trackKey = null;
-            this._lines = [];
-            this._setText('');
+            this._document = null;
+            this._hideOverlay();
             return;
         }
 
@@ -411,10 +445,10 @@ export default class EnlightenerExtension extends Extension {
             return;
 
         this._trackKey = trackKey;
-        this._lines = [];
+        this._document = null;
         this._positionSerial++;
         this._setPosition(0);
-        this._setText('Finding synchronized lyrics...');
+        this._showStatus('Finding synchronized lyrics...');
         this._syncPosition();
 
         const track = {
@@ -428,8 +462,9 @@ export default class EnlightenerExtension extends Extension {
 
         const cached = this._lyricsCache.get(track.cacheKey);
         if (cached) {
-            this._lines = cached;
-            this._updateCurrentLine();
+            this._document = cached;
+            this._renderSignature = null;
+            this._renderPlaybackFrame();
             return;
         }
 
@@ -463,7 +498,8 @@ export default class EnlightenerExtension extends Extension {
 
             const [position] = result.deepUnpack();
             this._setPosition(Number(unpack(position)));
-            this._updateCurrentLine();
+            this._renderSignature = null;
+            this._renderPlaybackFrame();
         } catch (error) {
             if (lifecycle === this._lifecycleGeneration &&
                 serial === this._positionSerial)
@@ -526,9 +562,9 @@ export default class EnlightenerExtension extends Extension {
                 track.key !== this._trackKey)
                 return;
 
-            const lines = parseSyncedLyrics(lyrics?.syncedLyrics);
-            if (!lines.length) {
-                this._setText('No synchronized lyrics found');
+            const document = parseLyricsResponse(lyrics);
+            if (!document.instrumental && !document.lines.length) {
+                this._showStatus('No synchronized lyrics found');
                 return;
             }
 
@@ -536,13 +572,14 @@ export default class EnlightenerExtension extends Extension {
                 const oldestKey = this._lyricsCache.keys().next().value;
                 this._lyricsCache.delete(oldestKey);
             }
-            this._lyricsCache.set(track.cacheKey, lines);
-            this._lines = lines;
-            this._updateCurrentLine();
+            this._lyricsCache.set(track.cacheKey, document);
+            this._document = document;
+            this._renderSignature = null;
+            this._renderPlaybackFrame();
         } catch (error) {
             if (lifecycle === this._lifecycleGeneration &&
                 !this._isCancelled(error)) {
-                this._setText('Could not load lyrics');
+                this._showStatus('Could not load lyrics');
                 this._logError(error);
             }
         } finally {
@@ -575,45 +612,180 @@ export default class EnlightenerExtension extends Extension {
             return null;
 
         return results.toSorted((a, b) => {
-            const syncedDifference = Number(b.syncedLyrics !== null) -
-                Number(a.syncedLyrics !== null);
-            if (syncedDifference)
-                return syncedDifference;
+            const qualityDifference = this._lyricsQuality(a) -
+                this._lyricsQuality(b);
+            if (qualityDifference)
+                return qualityDifference;
 
             return Math.abs(Number(a.duration) - targetDuration) -
                 Math.abs(Number(b.duration) - targetDuration);
         })[0];
     }
 
-    _updateCurrentLine() {
-        if (!this._lines.length || this._playbackStatus === 'Stopped')
-            return;
-
-        const position = this._currentPositionSeconds();
-        let low = 0;
-        let high = this._lines.length - 1;
-        let match = -1;
-
-        while (low <= high) {
-            const middle = Math.floor((low + high) / 2);
-            if (this._lines[middle].time <= position) {
-                match = middle;
-                low = middle + 1;
-            } else {
-                high = middle - 1;
-            }
-        }
-
-        this._setText(match >= 0 ? this._lines[match].text : '');
+    _lyricsQuality(response) {
+        const document = parseLyricsResponse(response);
+        if (document.lines.some(line => line.words.length))
+            return 0;
+        if (document.lines.length)
+            return 1;
+        if (document.instrumental)
+            return 2;
+        return 3;
     }
 
-    _setText(text) {
-        this._currentText = text;
-        if (!this._label || !this._overlay)
+    _applyPosition() {
+        if (!this._card || !this._settings)
             return;
 
-        this._label.text = text;
-        this._overlay.visible = this._userVisible && Boolean(text);
+        const position = this._settings.get_string('position');
+        const [xAlign, yAlign] = POSITION_ALIGNMENTS[position] ??
+            POSITION_ALIGNMENTS['bottom-center'];
+        this._card.x_align = xAlign;
+        this._card.y_align = yAlign;
+    }
+
+    _applyColors() {
+        if (!this._card || !this._settings || !this._interfaceSettings)
+            return;
+
+        const dark = this._interfaceSettings.get_string('color-scheme') ===
+            'prefer-dark';
+        const background = dark ? '36, 36, 36' : '250, 250, 250';
+        const foreground = dark ? '255, 255, 255' : '0, 0, 0';
+        const opacity = Math.min(1, Math.max(0,
+            this._settings.get_double('background-opacity')));
+
+        this._card.set_style(
+            `background-color: rgba(${background}, ${opacity}); ` +
+            `color: rgba(${foreground}, 0.9);`);
+    }
+
+    _lineAlignment() {
+        const position = this._settings.get_string('position');
+        if (position.endsWith('-left'))
+            return Pango.Alignment.LEFT;
+        if (position.endsWith('-right'))
+            return Pango.Alignment.RIGHT;
+        return Pango.Alignment.CENTER;
+    }
+
+    _createLineLabel(styleClass) {
+        const label = new St.Label({
+            style_class: `enlightener-line ${styleClass}`,
+            x_expand: true,
+        });
+        label.clutter_text.set({
+            ellipsize: Pango.EllipsizeMode.NONE,
+            line_alignment: this._lineAlignment(),
+            line_wrap: true,
+        });
+        return label;
+    }
+
+    _activeLineMarkup(line, positionMs) {
+        if (!line.words.length)
+            return GLib.markup_escape_text(line.text, -1);
+
+        const activeWord = getActiveWordIndex(line, positionMs);
+        return line.words.map((word, index) => {
+            const text = GLib.markup_escape_text(word.text, -1);
+            if (index === activeWord)
+                return `<span weight="bold" alpha="100%">${text}</span>`;
+            if (word.endMs <= positionMs)
+                return `<span alpha="85%">${text}</span>`;
+            return `<span alpha="45%">${text}</span>`;
+        }).join('');
+    }
+
+    _renderPlaybackFrame() {
+        if (!this._overlay || !this._card || !this._document ||
+            this._playbackStatus === 'Stopped')
+            return;
+
+        const positionMs = this._currentPositionSeconds() * 1_000;
+        const contextLength = this._settings.get_uint('context-lines');
+        const frame = getPlaybackFrame(
+            this._document, positionMs, contextLength);
+        const signature = frame.rows.map(row => {
+            if (row.kind !== 'active' || !row.line.words.length)
+                return `${row.kind}:${row.index ?? ''}`;
+            const completedWords = row.line.words.filter(word =>
+                word.endMs <= positionMs).length;
+            return `${row.kind}:${row.index}:` +
+                `${getActiveWordIndex(row.line, positionMs)}:${completedWords}`;
+        }).join('|');
+
+        if (signature === this._renderSignature)
+            return;
+        this._renderSignature = signature;
+        this._clearCard();
+
+        for (const row of frame.rows) {
+            if (row.kind === 'music') {
+                const label = this._createLineLabel('enlightener-music');
+                label.text = '♪';
+                this._card.add_child(label);
+                continue;
+            }
+
+            const styleClass = row.kind === 'active'
+                ? 'enlightener-active-line'
+                : 'enlightener-context-line';
+            const label = this._createLineLabel(styleClass);
+            if (row.kind === 'active')
+                label.clutter_text.set_markup(
+                    this._activeLineMarkup(row.line, positionMs));
+            else
+                label.text = row.line.text;
+            this._card.add_child(label);
+        }
+
+        this._resizeCard();
+        this._setHasContent(frame.rows.length > 0);
+    }
+
+    _showStatus(text) {
+        if (!this._card)
+            return;
+
+        this._renderSignature = `status:${text}`;
+        this._clearCard();
+        const label = this._createLineLabel('enlightener-status');
+        label.text = text;
+        this._card.add_child(label);
+        this._resizeCard();
+        this._setHasContent(true);
+    }
+
+    _resizeCard() {
+        if (!this._card || !this._overlay)
+            return;
+
+        this._card.set_width(-1);
+        const [, naturalWidth] = this._card.get_preferred_width(-1);
+        const maxWidth = Math.floor(
+            this._overlay.width * MAX_OVERLAY_WIDTH_RATIO);
+        this._card.set_width(Math.min(Math.ceil(naturalWidth), maxWidth));
+    }
+
+    _clearCard() {
+        if (!this._card)
+            return;
+
+        for (const child of this._card.get_children())
+            child.destroy();
+    }
+
+    _setHasContent(hasContent) {
+        this._hasContent = hasContent;
+        if (this._overlay)
+            this._overlay.visible = this._userVisible && hasContent;
+    }
+
+    _hideOverlay() {
+        this._hasContent = false;
+        this._renderSignature = null;
+        this._overlay?.hide();
     }
 
     _isCancelled(error) {

@@ -6,5 +6,29 @@
       <default><![CDATA[['<Super><Alt>l']]]></default>
       <summary>Toggle the lyrics overlay</summary>
     </key>
+    <key name="position" type="s">
+      <choices>
+        <choice value="top-left"/>
+        <choice value="top-center"/>
+        <choice value="top-right"/>
+        <choice value="center-left"/>
+        <choice value="center-right"/>
+        <choice value="bottom-left"/>
+        <choice value="bottom-center"/>
+        <choice value="bottom-right"/>
+      </choices>
+      <default>'bottom-center'</default>
+      <summary>Overlay position</summary>
+    </key>
+    <key name="context-lines" type="u">
+      <range min="0" max="5"/>
+      <default>1</default>
+      <summary>Number of surrounding lyric lines</summary>
+    </key>
+    <key name="background-opacity" type="d">
+      <range min="0.0" max="1.0"/>
+      <default>0.82</default>
+      <summary>Overlay background opacity</summary>
+    </key>
   </schema>
 </schemalist>
