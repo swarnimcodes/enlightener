@@ -561,14 +561,18 @@ export default class EnlightenerExtension extends Extension {
                 lyrics = await this._requestJson(
                     makeUrl('get', exactParameters), cancellable);
             } catch (error) {
-                if (error.status !== Soup.Status.NOT_FOUND)
+                if (this._isCancelled(error))
                     throw error;
+            }
 
+            let document = parseLyricsResponse(lyrics);
+            if (!document.instrumental && !document.lines.length) {
                 const results = await this._requestJson(makeUrl('search', {
                     track_name: track.title,
                     artist_name: track.artist,
                 }), cancellable);
                 lyrics = this._bestSearchResult(results, track.duration);
+                document = parseLyricsResponse(lyrics);
             }
 
             if (!this._enabled || lifecycle !== this._lifecycleGeneration ||
@@ -576,7 +580,6 @@ export default class EnlightenerExtension extends Extension {
                 track.key !== this._trackKey)
                 return;
 
-            const document = parseLyricsResponse(lyrics);
             if (!document.instrumental && !document.lines.length) {
                 this._showStatus('No synchronized lyrics found');
                 return;
