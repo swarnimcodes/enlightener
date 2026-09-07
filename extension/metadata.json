@@ -1,0 +1,8 @@
+{
+  "uuid": "enlightener@swarnim",
+  "name": "Enlightener",
+  "description": "Shows synchronized lyrics for the currently playing song using LRCLIB.",
+  "shell-version": ["50"],
+  "settings-schema": "org.gnome.shell.extensions.enlightener",
+  "url": "https://github.com/swarnimcodes/enlightener"
+}

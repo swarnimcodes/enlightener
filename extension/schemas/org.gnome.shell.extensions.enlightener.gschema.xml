@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.enlightener"
+          path="/org/gnome/shell/extensions/enlightener/">
+    <key name="toggle-overlay" type="as">
+      <default><![CDATA[['<Super><Alt>l']]]></default>
+      <summary>Toggle the lyrics overlay</summary>
+    </key>
+  </schema>
+</schemalist>
