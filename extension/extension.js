@@ -31,15 +31,15 @@ const PROPERTIES_INTERFACE = 'org.freedesktop.DBus.Properties';
 const TICK_INTERVAL_MS = 200;
 const MAX_CACHE_ENTRIES = 50;
 const MAX_OVERLAY_WIDTH_RATIO = 0.8;
-const POSITION_ALIGNMENTS = {
-    'top-left': [Clutter.ActorAlign.START, Clutter.ActorAlign.START],
-    'top-center': [Clutter.ActorAlign.CENTER, Clutter.ActorAlign.START],
-    'top-right': [Clutter.ActorAlign.END, Clutter.ActorAlign.START],
-    'center-left': [Clutter.ActorAlign.START, Clutter.ActorAlign.CENTER],
-    'center-right': [Clutter.ActorAlign.END, Clutter.ActorAlign.CENTER],
-    'bottom-left': [Clutter.ActorAlign.START, Clutter.ActorAlign.END],
-    'bottom-center': [Clutter.ActorAlign.CENTER, Clutter.ActorAlign.END],
-    'bottom-right': [Clutter.ActorAlign.END, Clutter.ActorAlign.END],
+const POSITION_FACTORS = {
+    'top-left': [0, 0],
+    'top-center': [0.5, 0],
+    'top-right': [1, 0],
+    'center-left': [0, 0.5],
+    'center-right': [1, 0.5],
+    'bottom-left': [0, 1],
+    'bottom-center': [0.5, 1],
+    'bottom-right': [1, 1],
 };
 
 function unpack(value) {
@@ -189,6 +189,9 @@ export default class EnlightenerExtension extends Extension {
 
         this._overlay = null;
         this._card = null;
+        this._xConstraint = null;
+        this._yConstraint = null;
+        this._workArea = null;
         this._settings = null;
         this._interfaceSettings = null;
         this._session = null;
@@ -202,7 +205,7 @@ export default class EnlightenerExtension extends Extension {
 
     _createOverlay() {
         this._overlay = new St.Widget({
-            layout_manager: new Clutter.BinLayout(),
+            layout_manager: new Clutter.FixedLayout(),
             reactive: false,
             visible: false,
         });
@@ -215,9 +218,19 @@ export default class EnlightenerExtension extends Extension {
         this._card = new St.BoxLayout({
             style_class: 'enlightener-card',
             vertical: true,
-            x_align: Clutter.ActorAlign.CENTER,
-            y_align: Clutter.ActorAlign.END,
         });
+        this._xConstraint = new Clutter.AlignConstraint({
+            source: this._overlay,
+            align_axis: Clutter.AlignAxis.X_AXIS,
+            factor: 0.5,
+        });
+        this._yConstraint = new Clutter.AlignConstraint({
+            source: this._overlay,
+            align_axis: Clutter.AlignAxis.Y_AXIS,
+            factor: 1,
+        });
+        this._card.add_constraint(this._xConstraint);
+        this._card.add_constraint(this._yConstraint);
         this._overlay.add_child(this._card);
 
         Main.layoutManager.addChrome(this._overlay, {
@@ -236,6 +249,7 @@ export default class EnlightenerExtension extends Extension {
             return;
 
         const workArea = Main.layoutManager.getWorkAreaForMonitor(monitor.index);
+        this._workArea = workArea;
         this._overlay.set_position(workArea.x, workArea.y);
         this._overlay.set_size(workArea.width, workArea.height);
         this._renderSignature = null;
@@ -634,14 +648,15 @@ export default class EnlightenerExtension extends Extension {
     }
 
     _applyPosition() {
-        if (!this._card || !this._settings)
+        if (!this._card || !this._settings ||
+            !this._xConstraint || !this._yConstraint)
             return;
 
         const position = this._settings.get_string('position');
-        const [xAlign, yAlign] = POSITION_ALIGNMENTS[position] ??
-            POSITION_ALIGNMENTS['bottom-center'];
-        this._card.x_align = xAlign;
-        this._card.y_align = yAlign;
+        const [xFactor, yFactor] = POSITION_FACTORS[position] ??
+            POSITION_FACTORS['bottom-center'];
+        this._xConstraint.factor = xFactor;
+        this._yConstraint.factor = yFactor;
     }
 
     _applyColors() {
@@ -758,14 +773,16 @@ export default class EnlightenerExtension extends Extension {
     }
 
     _resizeCard() {
-        if (!this._card || !this._overlay)
+        if (!this._card || !this._workArea)
             return;
 
         this._card.set_width(-1);
         const [, naturalWidth] = this._card.get_preferred_width(-1);
         const maxWidth = Math.floor(
-            this._overlay.width * MAX_OVERLAY_WIDTH_RATIO);
-        this._card.set_width(Math.min(Math.ceil(naturalWidth), maxWidth));
+            this._workArea.width * MAX_OVERLAY_WIDTH_RATIO);
+        const width = Math.min(Math.ceil(naturalWidth), maxWidth);
+        this._card.set_width(width);
+        this._applyPosition();
     }
 
     _clearCard() {
