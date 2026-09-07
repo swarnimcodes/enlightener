@@ -64,6 +64,7 @@ export default class EnlightenerExtension extends Extension {
         this._pendingPlayers = new Set();
         this._lyricsCache = new Map();
         this._selectedPlayer = null;
+        this._playerActivitySerial = 0;
         this._trackKey = null;
         this._document = null;
         this._renderSignature = null;
@@ -308,7 +309,13 @@ export default class EnlightenerExtension extends Extension {
                 !proxy.g_name_owner)
                 return;
 
-            const entry = {proxy};
+            const entry = {
+                proxy,
+                lastActive: this._property(
+                    proxy, 'PlaybackStatus', 'Stopped') === 'Playing'
+                    ? ++this._playerActivitySerial
+                    : 0,
+            };
             entry.propertiesSignalId = proxy.connect(
                 'g-properties-changed', (_proxy, changed) =>
                     this._onPropertiesChanged(name, changed));
@@ -369,6 +376,14 @@ export default class EnlightenerExtension extends Extension {
 
     _onPropertiesChanged(name, changed) {
         const changedProperties = changed.deepUnpack();
+        const entry = this._players.get(name);
+        if (entry &&
+            ('PlaybackStatus' in changedProperties ||
+                'Metadata' in changedProperties) &&
+            this._property(entry.proxy, 'PlaybackStatus', 'Stopped') ===
+                'Playing')
+            entry.lastActive = ++this._playerActivitySerial;
+
         this._choosePlayer();
 
         if (name !== this._selectedPlayer)
@@ -389,8 +404,11 @@ export default class EnlightenerExtension extends Extension {
             return;
 
         const entries = [...this._players.entries()];
-        const playing = entries.find(([, entry]) =>
-            this._property(entry.proxy, 'PlaybackStatus', 'Stopped') === 'Playing');
+        const playing = entries
+            .filter(([, entry]) =>
+                this._property(entry.proxy, 'PlaybackStatus', 'Stopped') ===
+                    'Playing')
+            .toSorted(([, a], [, b]) => b.lastActive - a.lastActive)[0];
         const nextName = playing?.[0] ??
             (this._players.has(this._selectedPlayer)
                 ? this._selectedPlayer
