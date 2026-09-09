@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-import {parse as parseYaml} from './vendor/yaml/dist/public-api.js';
+import { parse as parseYaml } from './vendor/yaml/dist/public-api.js';
 
 const LYRICSFILE_VERSION = '1.0';
 const MAX_LYRICSFILE_LENGTH = 1_000_000;
@@ -239,7 +239,7 @@ function nonEmptyIndexes(lines) {
 export function getPlaybackFrame(document, positionMs, contextLength) {
     if (document.instrumental) {
         return {
-            rows: [{kind: 'music'}],
+            rows: [{ kind: 'music' }],
             activeLines: [],
             music: true,
         };
@@ -279,10 +279,10 @@ export function getPlaybackFrame(document, positionMs, contextLength) {
     const betweenLyrics = !activeIndexes.length && lines.length > 0;
     const music = blankActive || betweenLyrics;
     const rows = [
-        ...before.map(index => ({kind: 'context', line: lines[index], index})),
-        ...activeIndexes.map(index => ({kind: 'active', line: lines[index], index})),
-        ...(music ? [{kind: 'music'}] : []),
-        ...after.map(index => ({kind: 'context', line: lines[index], index})),
+        ...before.map(index => ({ kind: 'context', line: lines[index], index })),
+        ...activeIndexes.map(index => ({ kind: 'active', line: lines[index], index })),
+        ...(music ? [{ kind: 'music' }] : []),
+        ...after.map(index => ({ kind: 'context', line: lines[index], index })),
     ];
 
     return {
