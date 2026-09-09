@@ -21,7 +21,7 @@ therefore sent to LRCLIB when a track starts.
 - Music indicator for instrumentals and timed interludes
 - Pause, resume, and seek synchronization
 - In-memory lyrics cache
-- `Super+Alt+L` visibility toggle
+- Configurable visibility shortcut (`Super+Alt+L` by default)
 
 ## Install
 

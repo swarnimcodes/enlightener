@@ -73,16 +73,18 @@ export default class EnlightenerExtension extends Extension {
         this._positionReadAtUs = GLib.get_monotonic_time();
         this._playbackStatus = 'Stopped';
         this._rate = 1;
-        this._userVisible = true;
         this._lyricsGeneration = 0;
         this._positionSerial = 0;
         this._cancellable = new Gio.Cancellable();
         this._session = new Soup.Session({timeout: 15});
+        this._settings = this.getSettings();
+        this._userVisible = this._settings.get_boolean('overlay-visible');
 
         this._createOverlay();
 
-        this._settings = this.getSettings();
         this._settingsSignalIds = [
+            this._settings.connect('changed::toggle-overlay', () =>
+                this._updateToggleKeybinding()),
             this._settings.connect('changed::position', () => {
                 this._applyPosition();
                 this._renderSignature = null;
@@ -103,12 +105,11 @@ export default class EnlightenerExtension extends Extension {
         this._applyPosition();
         this._applyColors();
 
-        Main.wm.addKeybinding(
-            'toggle-overlay',
-            this._settings,
-            Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
-            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
-            () => this._toggleOverlay());
+        this._toggleShortcut = this._settings.get_strv('toggle-overlay');
+        this._toggleKeybindingRegistered = false;
+        this._updatingToggleShortcut = false;
+        if (!this._registerToggleKeybinding() && this._toggleShortcut.length)
+            this._settings.set_string('shortcut-error', this._toggleShortcut[0]);
 
         this._nameOwnerSignalId = Gio.DBus.session.signal_subscribe(
             DBUS_INTERFACE,
@@ -157,7 +158,9 @@ export default class EnlightenerExtension extends Extension {
             this._nameOwnerSignalId = 0;
         }
 
-        Main.wm.removeKeybinding('toggle-overlay');
+        if (this._toggleKeybindingRegistered)
+            Main.wm.removeKeybinding('toggle-overlay');
+        this._toggleKeybindingRegistered = false;
 
         for (const signalId of this._settingsSignalIds)
             this._settings.disconnect(signalId);
@@ -259,7 +262,55 @@ export default class EnlightenerExtension extends Extension {
 
     _toggleOverlay() {
         this._userVisible = !this._userVisible;
+        this._settings.set_boolean('overlay-visible', this._userVisible);
         this._overlay.visible = this._userVisible && this._hasContent;
+    }
+
+    _registerToggleKeybinding() {
+        if (!this._toggleShortcut.length)
+            return true;
+
+        const accelerator = this._toggleShortcut[0];
+        const probeAction = global.display.grab_accelerator(
+            accelerator, Meta.KeyBindingFlags.IGNORE_AUTOREPEAT);
+        if (probeAction === Meta.KeyBindingAction.NONE)
+            return false;
+        global.display.ungrab_accelerator(probeAction);
+
+        const action = Main.wm.addKeybinding(
+            'toggle-overlay',
+            this._settings,
+            Meta.KeyBindingFlags.IGNORE_AUTOREPEAT,
+            Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+            () => this._toggleOverlay());
+        this._toggleKeybindingRegistered =
+            action !== Meta.KeyBindingAction.NONE;
+        return this._toggleKeybindingRegistered;
+    }
+
+    _updateToggleKeybinding() {
+        if (this._updatingToggleShortcut)
+            return;
+
+        const previousShortcut = this._toggleShortcut;
+        const requestedShortcut = this._settings.get_strv('toggle-overlay');
+        if (this._toggleKeybindingRegistered)
+            Main.wm.removeKeybinding('toggle-overlay');
+        this._toggleKeybindingRegistered = false;
+        this._toggleShortcut = requestedShortcut;
+
+        if (this._registerToggleKeybinding()) {
+            this._settings.set_string('shortcut-error', '');
+            return;
+        }
+
+        this._updatingToggleShortcut = true;
+        this._settings.set_string(
+            'shortcut-error', requestedShortcut[0] ?? '');
+        this._settings.set_strv('toggle-overlay', previousShortcut);
+        this._toggleShortcut = previousShortcut;
+        this._registerToggleKeybinding();
+        this._updatingToggleShortcut = false;
     }
 
     async _discoverPlayers() {

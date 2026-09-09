@@ -6,6 +6,14 @@
       <default><![CDATA[['<Super><Alt>l']]]></default>
       <summary>Toggle the lyrics overlay</summary>
     </key>
+    <key name="shortcut-error" type="s">
+      <default>''</default>
+      <summary>Most recently rejected overlay shortcut</summary>
+    </key>
+    <key name="overlay-visible" type="b">
+      <default>true</default>
+      <summary>Whether the lyrics overlay is visible</summary>
+    </key>
     <key name="position" type="s">
       <choices>
         <choice value="top-left"/>
