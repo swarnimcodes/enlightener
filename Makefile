@@ -11,7 +11,11 @@ test:
 pack: test
 	gnome-extensions pack extension --force \
 		--extra-source=LICENSE \
+		--extra-source=lyricsClient.js \
 		--extra-source=lyricsModel.js \
+		--extra-source=lyricsOverlay.js \
+		--extra-source=shortcutManager.js \
+		--extra-source=shortcutPreferences.js \
 		--extra-source=vendor
 
 install: pack

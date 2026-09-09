@@ -39,6 +39,16 @@ gnome-extensions enable enlightener@swarnim
 
 ## Development
 
+The extension is split by responsibility:
+
+- `extension.js` coordinates lifecycle and playback state.
+- `lyricsClient.js` owns LRCLIB requests and the response cache.
+- `lyricsModel.js` parses lyrics and builds playback frames.
+- `lyricsOverlay.js` renders and positions the Shell UI.
+- `shortcutManager.js` owns the global Shell keybinding.
+- `prefs.js` builds settings, with shortcut editing in
+  `shortcutPreferences.js`.
+
 GNOME 50 can run a nested Shell for testing:
 
 ```sh
